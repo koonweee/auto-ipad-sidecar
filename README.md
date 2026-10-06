@@ -27,6 +27,18 @@ monitor makes initial setup easier.
 That's it: AutoSidecar starts after each login and connects your enrolled iPad
 when you plug it in. `setup` can enroll separately; `install` enables the automation.
 
+### Unattended boot
+
+- Install and enroll first, then enable **System Settings → Users & Groups →
+  Automatically log in as** for the account running AutoSidecar.
+- Automatic login requires FileVault to be off and allows anyone with physical
+  access to boot into that account. See [Apple's automatic login guide](https://support.apple.com/en-us/102316)
+  for requirements and restrictions.
+- Leave the enrolled iPad connected by USB. AutoSidecar detects it after login;
+  it cannot display FileVault unlock or the login screen.
+- Test a restart before relying on a monitor-free setup. If Sidecar does not
+  connect, unlock the iPad and reconnect the cable.
+
 ## Preferences
 
 ```sh
