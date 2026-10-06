@@ -1,0 +1,5 @@
+/bin/
+/investigation/
+*.dSYM/
+.DS_Store
+config.plist

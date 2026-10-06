@@ -1,0 +1,12 @@
+#!/bin/zsh
+# Source-checkout launcher. Release binaries provide the same command directly.
+set -eu
+as_root="${0:A:h}"
+as_binary="$as_root/bin/auto-sidecar"
+as_rebuild=0
+[[ -x "$as_binary" ]] || as_rebuild=1
+for as_source in "$as_root"/src/* "$as_root"/scripts/* "$as_root/build.sh"; do
+  [[ "$as_source" -nt "$as_binary" ]] && as_rebuild=1
+done
+if (( as_rebuild )); then "$as_root/build.sh"; fi
+exec "$as_binary" "$@"
