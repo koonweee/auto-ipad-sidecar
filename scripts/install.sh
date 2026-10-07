@@ -15,11 +15,24 @@ as_changed=0
 if launchctl print "$as_job" >/dev/null 2>&1; then as_loaded=1; fi
 [[ ! -f "$as_base/auto-sidecar" ]] || cp "$as_base/auto-sidecar" "$as_staging/old-binary"
 [[ ! -f "$as_plist" ]] || cp "$as_plist" "$as_staging/old-plist"
+wait_for_unload() {
+  # bootout returns before a running job has exited and its label is removed.
+  # Allow the LaunchAgent's 45-second ExitTimeOut plus a little cleanup time.
+  local as_deadline=$(( SECONDS + 50 ))
+  while launchctl print "$as_job" >/dev/null 2>&1; do
+    if (( SECONDS >= as_deadline )); then
+      print -u2 'Timed out waiting for the previous AutoSidecar agent to unload.'
+      return 1
+    fi
+    sleep 0.1
+  done
+}
 rollback() {
   as_result=$?
   trap - EXIT
   if (( as_result != 0 && as_changed )); then
     launchctl bootout "$as_job" >/dev/null 2>&1 || true
+    wait_for_unload || print -u2 'Agent shutdown is unconfirmed; see logs.'
     if [[ -f "$as_staging/old-binary" ]]; then mv -f "$as_staging/old-binary" "$as_base/auto-sidecar"; else rm -f "$as_base/auto-sidecar"; fi
     if [[ -f "$as_staging/old-plist" ]]; then mv -f "$as_staging/old-plist" "$as_plist"; else rm -f "$as_plist"; fi
     if (( as_loaded )); then launchctl bootstrap "$as_domain" "$as_plist" || print -u2 'Could not restart previous version; see logs.'; fi
@@ -33,7 +46,11 @@ trap 'exit 130' INT TERM
 cp "$as_binary" "$as_staging/new-binary"
 "$as_binary" write-launchagent "$as_base/auto-sidecar" "$as_staging/new-plist" "$as_logs"
 plutil -lint "$as_staging/new-plist"
-if (( as_loaded )); then launchctl bootout "$as_job"; fi
+if (( as_loaded )); then
+  launchctl bootout "$as_job"
+  as_changed=1
+  wait_for_unload
+fi
 as_changed=1
 mv -f "$as_staging/new-binary" "$as_base/auto-sidecar"
 mv -f "$as_staging/new-plist" "$as_plist"

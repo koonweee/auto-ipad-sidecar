@@ -18,9 +18,21 @@ STUB
 cat > "$as_fixture/tools/launchctl" <<'STUB'
 #!/bin/zsh
 case "$1" in
- print) [[ -f "$AS_TEST_HOME/loaded" ]];;
- bootout) rm -f "$AS_TEST_HOME/loaded";;
+ print)
+   if [[ -f "$AS_TEST_HOME/stopping" ]]; then
+     remaining=$(<"$AS_TEST_HOME/stopping")
+     if (( remaining > 0 )); then
+       print $(( remaining - 1 )) > "$AS_TEST_HOME/stopping"
+     else
+       rm -f "$AS_TEST_HOME/loaded" "$AS_TEST_HOME/stopping"
+     fi
+   fi
+   [[ -f "$AS_TEST_HOME/loaded" ]];;
+ bootout)
+   if [[ -f "$AS_TEST_HOME/loaded" ]]; then print 3 > "$AS_TEST_HOME/stopping"; fi;;
  bootstrap)
+   # Match launchd: the same label cannot bootstrap during asynchronous unload.
+   if [[ -f "$AS_TEST_HOME/loaded" ]]; then exit 5; fi
    if [[ -f "$AS_TEST_HOME/fail-once" ]]; then rm "$AS_TEST_HOME/fail-once"; exit 1; fi
    touch "$AS_TEST_HOME/loaded";;
  *) exit 99;;
@@ -44,4 +56,4 @@ cmp "$as_fixture/expected-plist" "$AS_TEST_HOME/Library/LaunchAgents/local.auto-
 [[ -f "$AS_TEST_HOME/Library/Application Support/AutoSidecar/config.plist" ]]
 "$as_fixture/project/install.sh" "$as_fixture/project/bin/auto-sidecar" >/dev/null
 cmp "$as_fixture/project/bin/auto-sidecar" "$AS_TEST_HOME/Library/Application Support/AutoSidecar/auto-sidecar"
-print 'PASS: fresh installation, failed-update rollback, restart previous agent, successful update, retained config'
+print 'PASS: fresh installation, asynchronous unload, failed-update rollback, restart previous agent, successful update, retained config'
