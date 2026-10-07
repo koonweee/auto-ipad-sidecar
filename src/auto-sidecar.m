@@ -191,7 +191,7 @@ static void attempt(NSUInteger epoch) {
                 cleanupHelper();return;
             }
             if (task.terminationStatus==ASOK) {
-                endRecovery(YES);NSLog(@"Recovery handled; waiting for the next USB attachment or Mac wake");return;
+                endRecovery(YES);NSLog(@"Recovery handled; waiting for the next USB attachment, Mac wake, or screen wake");return;
             }
             recovery.retryLayout=(task.terminationStatus==ASLayoutFailed);
             if (recovery.attempts>=ASMaxAttempts) {
@@ -226,12 +226,12 @@ static void macWillSleep(void) {
     NSLog(@"Mac sleeping; cancelling pending recovery");
 }
 
-static void macDidWake(void) {
+static void resumeAfterWake(NSString *reason) {
     // USB and display callbacks may arrive before enumeration settles. Pause
     // them during this delay, then re-read USB even if no attach event arrives.
     suspendRecovery();
     NSUInteger epoch=recovery.generation;
-    NSLog(@"Mac woke; waiting 5 seconds for USB and Sidecar services");
+    NSLog(@"%@; waiting 5 seconds for USB and Sidecar services",reason);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC),dispatch_get_main_queue(),^{
         if(epoch!=recovery.generation)return;
         ASResetRecovery(&recovery,usbPresent(),NO);
@@ -244,6 +244,17 @@ static void macDidWake(void) {
             cleanupHelper();
         }
     });
+}
+
+static NSArray *ObservePowerEvents(NSNotificationCenter *center) {
+    // Display sleep is independent of system sleep (for example, after locking
+    // a Mac whose background apps keep it awake). Handle both return paths.
+    id sleep=[center addObserverForName:NSWorkspaceWillSleepNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(__unused NSNotification *note){macWillSleep();}];
+    id wake=[center addObserverForName:NSWorkspaceDidWakeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(__unused NSNotification *note){resumeAfterWake(@"Mac woke");}];
+    id screensWake=[center addObserverForName:NSWorkspaceScreensDidWakeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(__unused NSNotification *note){resumeAfterWake(@"Screens woke");}];
+    // Each wake restarts the same settling timer, so overlapping system and
+    // screen wake notifications produce one recovery cycle.
+    return @[sleep,wake,screensWake];
 }
 
 static void usbChanged(__unused void *ctx,io_iterator_t it) {
@@ -296,8 +307,7 @@ static int watchUSB(void) {
     [NSApp setActivationPolicy:NSApplicationActivationPolicyProhibited];
     InitializePreferences();
     NSNotificationCenter *workspaceCenter=NSWorkspace.sharedWorkspace.notificationCenter;
-    id sleepObserver=[workspaceCenter addObserverForName:NSWorkspaceWillSleepNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(__unused NSNotification *note){macWillSleep();}];
-    id wakeObserver=[workspaceCenter addObserverForName:NSWorkspaceDidWakeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(__unused NSNotification *note){macDidWake();}];
+    NSArray *powerObservers=ObservePowerEvents(workspaceCenter);
     previousOtherDisplays=otherDisplayIDs();
     CGError registration=CGDisplayRegisterReconfigurationCallback(displayChanged,NULL);
     NSLog(@"Display callback registration result=%d",registration);
@@ -312,8 +322,7 @@ static int watchUSB(void) {
     usbChanged(NULL,b);
     NSLog(@"Watching exact iPad USB identity; initial=%@",recovery.attached?@"attached":@"absent");
     [NSApp run];
-    [workspaceCenter removeObserver:sleepObserver];
-    [workspaceCenter removeObserver:wakeObserver];
+    for(id observer in powerObservers)[workspaceCenter removeObserver:observer];
     return ASOK;
 }
 
