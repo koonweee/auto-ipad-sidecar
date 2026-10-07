@@ -44,13 +44,6 @@ static BOOL usbPresent(void) {
 
 static NSString *executable;
 static NSTask *worker;
-typedef struct {
-    NSUInteger generation;
-    NSUInteger attempts;
-    BOOL attached;
-    BOOL retryLayout;
-    BOOL recovering;
-} ASRecoveryState;
 static ASRecoveryState recovery;
 static NSUInteger displayChangeGeneration;
 static BOOL displayChangePending;
@@ -147,6 +140,7 @@ static BOOL prepareDesktop(void) {
 // Display removal notifications also arrive when Sidecar ends over Wi-Fi.
 // Do not leave a ghost desktop after failed recovery or an ended session.
 static void cleanupHelper(void) {
+    if(recovery.suspended)return;
     CheckDockSession();
     if (!virtualDisplay)return;
     CGDirectDisplayID displays[64];
@@ -197,7 +191,7 @@ static void attempt(NSUInteger epoch) {
                 cleanupHelper();return;
             }
             if (task.terminationStatus==ASOK) {
-                endRecovery(YES);NSLog(@"Attachment handled; no more attempts until next USB attachment");return;
+                endRecovery(YES);NSLog(@"Recovery handled; waiting for the next USB attachment or Mac wake");return;
             }
             recovery.retryLayout=(task.terminationStatus==ASLayoutFailed);
             if (recovery.attempts>=ASMaxAttempts) {
@@ -219,6 +213,39 @@ static void scheduleAttempt(NSUInteger epoch,double delay) {
     });
 }
 
+static void suspendRecovery(void) {
+    ASResetRecovery(&recovery,recovery.attached,YES);
+    displayChangeGeneration++;
+    displayChangePending=NO;
+    dockRefreshPending=NO;
+    if(worker.running)[worker terminate];
+}
+
+static void macWillSleep(void) {
+    suspendRecovery();
+    NSLog(@"Mac sleeping; cancelling pending recovery");
+}
+
+static void macDidWake(void) {
+    // USB and display callbacks may arrive before enumeration settles. Pause
+    // them during this delay, then re-read USB even if no attach event arrives.
+    suspendRecovery();
+    NSUInteger epoch=recovery.generation;
+    NSLog(@"Mac woke; waiting 5 seconds for USB and Sidecar services");
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC),dispatch_get_main_queue(),^{
+        if(epoch!=recovery.generation)return;
+        ASResetRecovery(&recovery,usbPresent(),NO);
+        previousOtherDisplays=otherDisplayIDs();
+        if(recovery.attached){
+            NSLog(@"Enrolled USB iPad present after wake; restarting recovery");
+            scheduleAttempt(recovery.generation,0);
+        }else{
+            NSLog(@"Enrolled USB iPad absent after wake; waiting for attachment");
+            cleanupHelper();
+        }
+    });
+}
+
 static void usbChanged(__unused void *ctx,io_iterator_t it) {
     io_service_t s;
     BOOL relevant=NO;
@@ -228,13 +255,10 @@ static void usbChanged(__unused void *ctx,io_iterator_t it) {
     }
     if (!relevant)return;
     BOOL now=usbPresent();
+    if(recovery.suspended){recovery.attached=now;return;}
     if (now==recovery.attached)return;
-    recovery.attached=now;
+    ASResetRecovery(&recovery,now,NO);
     dockRefreshPending=NO;
-    recovery.generation++;
-    recovery.attempts=0;
-    recovery.retryLayout=NO;
-    recovery.recovering=recovery.attached;
     NSLog(@"USB %@",recovery.attached?@"attached; waiting 3 seconds for enumeration":@"detached; resetting attachment state");
     if (!recovery.attached) {
         if (worker.running)[worker terminate];
@@ -248,10 +272,11 @@ static void usbChanged(__unused void *ctx,io_iterator_t it) {
 static void displayChanged(__unused CGDirectDisplayID display,CGDisplayChangeSummaryFlags flags,__unused void *ctx) {
     if (flags&kCGDisplayBeginConfigurationFlag)return;
     dispatch_async(dispatch_get_main_queue(),^ {
+        if(recovery.suspended)return;
         NSUInteger ticket=++displayChangeGeneration;
         displayChangePending=YES;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC),dispatch_get_main_queue(),^ {
-            if (ticket!=displayChangeGeneration)return;
+            if (ticket!=displayChangeGeneration||recovery.suspended)return;
             displayChangePending=NO;
             NSArray *ids=otherDisplayIDs();if (!ids||[ids isEqual:previousOtherDisplays]){cleanupHelper();return;}
             previousOtherDisplays=ids;
@@ -270,6 +295,9 @@ static int watchUSB(void) {
     [NSApplication sharedApplication];
     [NSApp setActivationPolicy:NSApplicationActivationPolicyProhibited];
     InitializePreferences();
+    NSNotificationCenter *workspaceCenter=NSWorkspace.sharedWorkspace.notificationCenter;
+    id sleepObserver=[workspaceCenter addObserverForName:NSWorkspaceWillSleepNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(__unused NSNotification *note){macWillSleep();}];
+    id wakeObserver=[workspaceCenter addObserverForName:NSWorkspaceDidWakeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(__unused NSNotification *note){macDidWake();}];
     previousOtherDisplays=otherDisplayIDs();
     CGError registration=CGDisplayRegisterReconfigurationCallback(displayChanged,NULL);
     NSLog(@"Display callback registration result=%d",registration);
@@ -284,6 +312,8 @@ static int watchUSB(void) {
     usbChanged(NULL,b);
     NSLog(@"Watching exact iPad USB identity; initial=%@",recovery.attached?@"attached":@"absent");
     [NSApp run];
+    [workspaceCenter removeObserver:sleepObserver];
+    [workspaceCenter removeObserver:wakeObserver];
     return ASOK;
 }
 
@@ -479,7 +509,7 @@ static int SessionSnapshot(void) {
     return data?ASOK:ASUnavailable;
 }
 static void CheckDockSession(void) {
-    if(!dockQueue||dockStopping)return;
+    if(!dockQueue||dockStopping||recovery.suspended)return;
     if(recovery.recovering||worker.running||displayChangePending)return;
     if(sessionProbe.running){sessionProbeAgain=YES;return;}
     // No configured profiles and no historical record -> no Dock reads or Automation access.
@@ -496,7 +526,7 @@ static void CheckDockSession(void) {
         NSData *data=[output.fileHandleForReading readDataToEndOfFile];
         NSDictionary *snapshot=task.terminationStatus==0?[NSJSONSerialization JSONObjectWithData:data options:0 error:NULL]:nil;
         dispatch_async(dispatch_get_main_queue(),^{
-            if(!dockStopping&&version==preferenceGeneration&&epoch==recovery.generation&&displayEpoch==displayChangeGeneration&&!recovery.recovering&&!worker.running&&!displayChangePending&&snapshot){
+            if(!dockStopping&&!recovery.suspended&&version==preferenceGeneration&&epoch==recovery.generation&&displayEpoch==displayChangeGeneration&&!recovery.recovering&&!worker.running&&!displayChangePending&&snapshot){
                 BOOL active=[snapshot[@"active"] boolValue];
                 NSDictionary *profile=profiles[[snapshot[@"otherCount"] unsignedIntegerValue]?@"withOtherDisplays":@"ipadOnly"];
                 dispatch_async(dockQueue,^{
@@ -504,7 +534,7 @@ static void CheckDockSession(void) {
                     // A new USB/display transition invalidates queued work before it writes.
                     __block BOOL current=NO,refresh=NO;
                     dispatch_sync(dispatch_get_main_queue(),^{
-                        current=!dockStopping&&version==preferenceGeneration&&epoch==recovery.generation&&displayEpoch==displayChangeGeneration&&!recovery.recovering&&!worker.running&&!displayChangePending;
+                        current=!dockStopping&&!recovery.suspended&&version==preferenceGeneration&&epoch==recovery.generation&&displayEpoch==displayChangeGeneration&&!recovery.recovering&&!worker.running&&!displayChangePending;
                         if(current){refresh=dockRefreshPending;dockRefreshPending=NO;}
                     });
                     if(!current)return;
@@ -520,7 +550,7 @@ static void CheckDockSession(void) {
     NSError *error=nil;if(![probe launchAndReturnError:&error])NSLog(@"Optional Dock session verification failed: %@",error);
 }
 static void ReconcileLayout(void) {
-    if(worker.running||recovery.recovering||displayChangePending){dispatch_after(dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC),dispatch_get_main_queue(),^{ReconcileLayout();});return;}
+    if(recovery.suspended||worker.running||recovery.recovering||displayChangePending){dispatch_after(dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC),dispatch_get_main_queue(),^{ReconcileLayout();});return;}
     // Apply only to an existing session. Never start/restart Sidecar just to reload preferences.
     NSTask *task=[NSTask new];worker=task;
     task.executableURL=[NSURL fileURLWithPath:executable];

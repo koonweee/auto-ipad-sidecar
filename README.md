@@ -1,7 +1,7 @@
 # AutoSidecar
 
 Plug in your iPad to use it as a Mac display. AutoSidecar starts Sidecar on USB
-connection and runs automatically after login.
+connection, reconnects after Mac wake, and runs automatically after login.
 
 - **At your desk:** add the iPad as an extra screen alongside any other monitor.
 - **Without a monitor:** use the iPad as your Mac's desktop, including on a Mac mini.
@@ -26,6 +26,8 @@ monitor makes initial setup easier.
 
 That's it: AutoSidecar starts after each login and connects your enrolled iPad
 when you plug it in. `setup` can enroll separately; `install` enables the automation.
+After Mac sleep, it waits five seconds for services to settle and retries Sidecar
+if the enrolled iPad is still connected by USB. An active connection is preserved.
 
 ### Unattended boot
 

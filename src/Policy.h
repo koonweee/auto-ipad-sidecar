@@ -14,3 +14,20 @@ static inline BOOL ASShouldReleaseHelper(BOOL recovering, BOOL workerRunning, BO
 static inline BOOL ASAttemptIsCurrent(NSUInteger scheduled, NSUInteger current, BOOL attached, BOOL recovering) {
     return scheduled == current && attached && recovering;
 }
+
+typedef struct {
+    NSUInteger generation;
+    NSUInteger attempts;
+    BOOL attached;
+    BOOL retryLayout;
+    BOOL recovering;
+    BOOL suspended;
+} ASRecoveryState;
+static inline void ASResetRecovery(ASRecoveryState *state, BOOL attached, BOOL suspended) {
+    state->generation++;
+    state->attempts=0;
+    state->attached=attached;
+    state->retryLayout=NO;
+    state->recovering=attached&&!suspended;
+    state->suspended=suspended;
+}
